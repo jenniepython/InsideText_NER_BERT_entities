@@ -1,0 +1,9 @@
+streamlit
+torch
+transformers
+numpy
+pandas
+requests
+streamlit-authenticator
+plotly
+pyyaml

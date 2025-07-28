@@ -212,61 +212,57 @@ class LightweightEntityLinker:
         return context_info
 
     def extract_entities(self, text: str):
-        """Extract named entities with improved settings."""
-        entities = []
-        
-        # Try transformer-based NER if available
-        if self.ner_pipeline:
-            try:
-                raw_entities = self.ner_pipeline(text)
-                
-                # DEBUG: Print what transformer finds
-                print("DEBUG - Raw entities from transformer:")
-                for ent in raw_entities:
-                    print(f"  '{ent['word']}' ({ent['entity_group']}) - confidence: {ent['score']:.3f}")
-                
-                # Process transformer entities with LOWER confidence threshold
-                for ent in raw_entities:
-                    entity_type = self._map_entity_type(ent['entity_group'])
+            """Extract named entities with minimal filtering to see what BERT actually finds."""
+            entities = []
+            
+            # Try transformer-based NER if available
+            if self.ner_pipeline:
+                try:
+                    raw_entities = self.ner_pipeline(text)
                     
-                    # LOWER confidence threshold - many valid entities have 0.3-0.6 confidence
-                    if ent['score'] < 0.3:  # Changed from 0.6 to 0.3
-                        continue
-                    
-                    # Better entity text handling
-                    entity_text = ent['word'].strip()
-                    
-                    # Create entity dictionary
-                    entity = {
-                        'text': entity_text,
-                        'type': entity_type,
-                        'start': ent['start'],
-                        'end': ent['end'],
-                        'confidence': ent['score'],
-                        'original_label': ent['entity_group'],
-                        'extraction_method': 'transformer'
-                    }
-                    
-                    # Add contextual information
-                    context_info = self._generate_contextual_analysis(text, entity_text, entity_type)
-                    entity.update(context_info)
-                    
-                    # LESS restrictive validation
-                    if self._is_valid_entity_relaxed(entity, text):
-                        entities.append(entity)
+                    # Process transformer entities with MINIMAL filtering
+                    for ent in raw_entities:
+                        entity_type = self._map_entity_type(ent['entity_group'])
                         
-            except Exception as e:
-                st.warning(f"Transformer NER failed: {e}")
-                # Continue with pattern-based extraction
-        
-        # Always add pattern-based extraction
-        pattern_entities = self._extract_pattern_entities_improved(text)
-        entities.extend(pattern_entities)
-        
-        # Remove overlapping entities
-        entities = self._remove_overlapping_entities(entities)
-        
-        return entities
+                        # REMOVE confidence threshold temporarily - keep everything!
+                        # if ent['score'] < 0.3:
+                        #     continue
+                        
+                        entity_text = ent['word'].strip()
+                        
+                        # REMOVE validation temporarily - keep everything!
+                        # Skip only completely empty entities
+                        if len(entity_text) == 0:
+                            continue
+                        
+                        # Create entity dictionary
+                        entity = {
+                            'text': entity_text,
+                            'type': entity_type,
+                            'start': ent['start'],
+                            'end': ent['end'],
+                            'confidence': ent['score'],
+                            'original_label': ent['entity_group'],
+                            'extraction_method': 'transformer'
+                        }
+                        
+                        # Add contextual information
+                        context_info = self._generate_contextual_analysis(text, entity_text, entity_type)
+                        entity.update(context_info)
+                        
+                        entities.append(entity)
+                            
+                except Exception as e:
+                    st.warning(f"Transformer NER failed: {e}")
+            
+            # Don't add pattern entities for now - just see what BERT finds
+            # pattern_entities = self._extract_pattern_entities_improved(text)
+            # entities.extend(pattern_entities)
+            
+            # Remove overlapping entities
+            entities = self._remove_overlapping_entities(entities)
+            
+            return entities
 
     def _map_entity_type(self, ner_label: str) -> str:
         """Map NER model labels to our standardised types."""

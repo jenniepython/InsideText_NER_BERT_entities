@@ -134,6 +134,7 @@ import time
 import requests
 import urllib.parse
 import pycountry
+import hashlib
 
 class LightweightEntityLinker:
     """
@@ -169,20 +170,19 @@ class LightweightEntityLinker:
         self._load_models()
 
     def _load_models(self):
-        """Load model for entity extraction."""
+        """Load model for entity extraction with improved settings."""
         try:
             from transformers import pipeline
             
             # Load NER model
             with st.spinner("Loading NER model..."):
                 try:
-                    # Use a lighter, pre-compiled model that doesn't require compilation
                     ner_model_name = "dslim/bert-base-NER"
                     self.ner_pipeline = pipeline(
                         "ner",
                         model=ner_model_name,
                         tokenizer=ner_model_name,
-                        aggregation_strategy="simple"
+                        aggregation_strategy="max"  # Better for multi-word entities
                     )
                     st.success("dslim/bert-base-NER model loaded successfully")
                 except Exception as e:
@@ -199,7 +199,6 @@ class LightweightEntityLinker:
             st.error(f"Error loading models: {e}")
             st.stop()
 
-
     def _generate_contextual_analysis(self, text: str, entity_text: str, entity_type: str) -> Dict[str, Any]:
         """Generate contextual analysis using rule-based approaches."""
         context_info = {
@@ -213,7 +212,7 @@ class LightweightEntityLinker:
         return context_info
 
     def extract_entities(self, text: str):
-        """Extract named entities from text using dslim/bert-base-NER model and patterns."""
+        """Extract named entities with improved settings."""
         entities = []
         
         # Try transformer-based NER if available
@@ -221,16 +220,21 @@ class LightweightEntityLinker:
             try:
                 raw_entities = self.ner_pipeline(text)
                 
-                # Process transformer entities
+                # DEBUG: Print what transformer finds
+                print("DEBUG - Raw entities from transformer:")
+                for ent in raw_entities:
+                    print(f"  '{ent['word']}' ({ent['entity_group']}) - confidence: {ent['score']:.3f}")
+                
+                # Process transformer entities with LOWER confidence threshold
                 for ent in raw_entities:
                     entity_type = self._map_entity_type(ent['entity_group'])
                     
-                    # Filter out low-confidence entities
-                    if ent['score'] < 0.6:
+                    # LOWER confidence threshold - many valid entities have 0.3-0.6 confidence
+                    if ent['score'] < 0.3:  # Changed from 0.6 to 0.3
                         continue
                     
-                    # Clean up entity text
-                    entity_text = ent['word'].replace('##', '').strip()
+                    # Better entity text handling
+                    entity_text = ent['word'].strip()
                     
                     # Create entity dictionary
                     entity = {
@@ -247,8 +251,8 @@ class LightweightEntityLinker:
                     context_info = self._generate_contextual_analysis(text, entity_text, entity_type)
                     entity.update(context_info)
                     
-                    # Additional validation
-                    if self._is_valid_entity(entity, text):
+                    # LESS restrictive validation
+                    if self._is_valid_entity_relaxed(entity, text):
                         entities.append(entity)
                         
             except Exception as e:
@@ -256,7 +260,7 @@ class LightweightEntityLinker:
                 # Continue with pattern-based extraction
         
         # Always add pattern-based extraction
-        pattern_entities = self._extract_pattern_entities(text)
+        pattern_entities = self._extract_pattern_entities_improved(text)
         entities.extend(pattern_entities)
         
         # Remove overlapping entities
@@ -286,8 +290,8 @@ class LightweightEntityLinker:
         }
         return mapping.get(ner_label, 'MISC')
 
-    def _extract_pattern_entities(self, text: str) -> List[Dict[str, Any]]:
-        """Extract entities using pattern matching."""
+    def _extract_pattern_entities_improved(self, text: str) -> List[Dict[str, Any]]:
+        """Improved pattern extraction with better address patterns."""
         pattern_entities = []
         
         # Email patterns
@@ -344,10 +348,14 @@ class LightweightEntityLinker:
             entity.update(context_info)
             pattern_entities.append(entity)
         
-        # Address patterns
+        # IMPROVED Address patterns - more flexible
         address_patterns = [
-            r'\b\d{1,5}[-–]\d{1,5}\s+[A-Z][a-zA-Z\s]+(?:Road|Street|Avenue|Lane|Drive|Way|Place|Square|Gardens|Court|Close|Crescent|Boulevard|Terrace)\b',
-            r'\b\d{1,5}\s+[A-Z][a-zA-Z\s]+(?:Road|Street|Avenue|Lane|Drive|Way|Place|Square|Gardens|Court|Close|Crescent|Boulevard|Terrace)\b'
+            # Handle ranges like "191-193" with different dashes
+            r'\b\d{1,5}[-–—]\d{1,5}\s+[A-Z][a-zA-Z\s]+(?:Road|Street|Avenue|Lane|Drive|Way|Place|Square|Gardens|Court|Close|Crescent|Boulevard|Terrace)\b',
+            # Regular numbered addresses
+            r'\b\d{1,5}\s+[A-Z][a-zA-Z\s]+(?:Road|Street|Avenue|Lane|Drive|Way|Place|Square|Gardens|Court|Close|Crescent|Boulevard|Terrace)\b',
+            # Handle cases without numbers but clear street names
+            r'\b[A-Z][a-zA-Z\s]{2,}\s+(?:Road|Street|Avenue|Lane|Drive|Way|Place|Square|Gardens|Court|Close|Crescent|Boulevard|Terrace)\b'
         ]
         
         for pattern in address_patterns:
@@ -364,6 +372,38 @@ class LightweightEntityLinker:
                 context_info = self._generate_contextual_analysis(text, entity['text'], 'ADDRESS')
                 entity.update(context_info)
                 pattern_entities.append(entity)
+        
+        # Add year pattern (like "1961")
+        year_pattern = r'\b(19|20)\d{2}\b'
+        for match in re.finditer(year_pattern, text):
+            entity = {
+                'text': match.group(),
+                'type': 'DATE',
+                'start': match.start(),
+                'end': match.end(),
+                'confidence': 0.9,
+                'original_label': 'YEAR_PATTERN',
+                'extraction_method': 'pattern'
+            }
+            context_info = self._generate_contextual_analysis(text, entity['text'], 'DATE')
+            entity.update(context_info)
+            pattern_entities.append(entity)
+        
+        # Add title patterns (Dr, Mr, Mrs, etc.)
+        title_pattern = r'\b(?:Dr|Mr|Mrs|Ms|Prof|Professor)\s+[A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)*\b'
+        for match in re.finditer(title_pattern, text):
+            entity = {
+                'text': match.group(),
+                'type': 'PERSON',
+                'start': match.start(),
+                'end': match.end(),
+                'confidence': 0.9,
+                'original_label': 'TITLE_PERSON_PATTERN',
+                'extraction_method': 'pattern'
+            }
+            context_info = self._generate_contextual_analysis(text, entity['text'], 'PERSON')
+            entity.update(context_info)
+            pattern_entities.append(entity)
         
         # Money patterns
         money_patterns = [
@@ -390,8 +430,7 @@ class LightweightEntityLinker:
         
         # Company/Organisation patterns (based on common suffixes)
         org_patterns = [
-            r'\b[A-Z][a-zA-Z\s&]+(?:Inc|LLC|Ltd|Corporation|Corp|Company|Co|Limited|plc|AG|GmbH|SA|SAS|BV|NV|AB|AS|Oy|SpA|Srl|SARL|SL|SLU|JSC|PJSC|OOO|ZAO|OAO|KG|eK|UG|mbH|SE|SCE|SCOP|SCP|SCS|SCA|SICAV|SICAF|SOPARFI|SPF|SIF|SICAR|RAIF|FIAR|PSF|CSS|CSSF|CSDB|UCITS|AIFMD|ESMA|EBA|EIOPA|CFTC|SEC|FINRA|MSRB|FICC|NSCC|DTC|OCC|CBOE|NYSE|NASDAQ|LSE|TSE|HKEX|SGX|ASX|JSE|BSE|NSE|KOSPI|NIKKEI|FTSE|DAX|CAC|IBEX|SMI|AEX|OMX|WIG|PX|BET|SOFIX|CROBEX|MONEX|BELEX|SASX|PFTS|RTS|MICEX|MOEX|TADAWUL|ADX|DFM|QE|BHB|MSM|KSE|CSE|DSE|ChiNext|STAR|SZSE|SHSE|BSE|NSE|KOSDAQ|MOTHERS|JASDAQ|OSE|TSE|HKEX|SGX|ASX|JSE|EGX|CASE|USE|DSE|GSE|NSE|BSE|MSE|ZSE|LSE|ISE|BIST|ATHEX|BVMF|BOVESPA|BMV|BCS|BVL|BVC|BYMA|COLCAP|IGBC|MERVAL|BOVESPA|B3|BVMF|BVCA|BVAL|BVAQ|BVMT|BVPG|BVMG|BVSP|BVGO|BVDF|BVCE|BVSC|BVPR|BVPE|BVPB|BVMS|BVMA|BVAP|BVAC|BVAA|BVTO|BVSE|BVRI|BVRO|BVRN|BVRS|BVPA|BVBA|BVAL|BVIT|BVSP|BVMF|BVCA|BVAQ|BVMT|BVPG|BVMG|BVSP|BVGO|BVDF|BVCE|BVSC|BVPR|BVPE|BVPB|BVMS|BVMA|BVAP|BVAC|BVAA|BVTO|BVSE|BVRI|BVRO|BVRN|BVRS|BVPA|BVBA|BVAL|BVIT)\b',
-            r'\b[A-Z][a-zA-Z\s&]+(?:University|College|Institute|School|Foundation|Trust|Society|Association|Union|Federation|Alliance|Council|Board|Committee|Commission|Agency|Department|Ministry|Office|Bureau|Authority|Service|Group|Team|Club|Organization|Centre|Center)\b'
+            r'\b[A-Z][a-zA-Z\s&]+(?:Inc|LLC|Ltd|Corporation|Corp|Company|Co|Limited|plc|AG|GmbH|SA|University|College|Institute|School|Foundation|Trust|Society|Association|Union|Federation|Alliance|Council|Board|Committee|Commission|Agency|Department|Ministry|Office|Bureau|Authority|Service|Group|Team|Club|Organization|Centre|Center)\b'
         ]
         
         for pattern in org_patterns:
@@ -416,8 +455,8 @@ class LightweightEntityLinker:
         
         return pattern_entities
 
-    def _is_valid_entity(self, entity: Dict[str, Any], text: str) -> bool:
-        """Validate an entity using heuristics and context."""
+    def _is_valid_entity_relaxed(self, entity: Dict[str, Any], text: str) -> bool:
+        """More relaxed entity validation."""
         entity_text = entity['text'].strip()
         
         # Skip very short entities
@@ -425,7 +464,7 @@ class LightweightEntityLinker:
             return False
         
         # Skip common false positives
-        false_positives = {'the', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'a', 'an'}
+        false_positives = {'the', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'a', 'an', 'it', 'is', 'was', 'were', 'been', 'be', 'have', 'has', 'had', 'his', 'her', 'their', 'this', 'that', 'they', 'he', 'she'}
         if entity_text.lower() in false_positives:
             return False
         
@@ -433,34 +472,31 @@ class LightweightEntityLinker:
         if len(re.sub(r'[^\w\s]', '', entity_text)) <= 1:
             return False
         
-        # Additional validation based on entity type
+        # RELAXED validation - allow more entities through
         if entity['type'] == 'PERSON':
-            return self._validate_person_entity(entity_text)
-        elif entity['type'] in ['ORGANIZATION', 'LOCATION', 'GPE']:
-            return self._validate_place_or_org_entity(entity_text)
+            return self._validate_person_entity_relaxed(entity_text)
+        elif entity['type'] in ['ORGANIZATION', 'LOCATION', 'GPE', 'FACILITY']:
+            return self._validate_place_or_org_entity_relaxed(entity_text)
         
         return True
 
-    def _validate_person_entity(self, entity_text: str) -> bool:
-        """Validate person entities."""
-        # Should contain at least one capital letter
-        if not any(c.isupper() for c in entity_text):
+    def _validate_person_entity_relaxed(self, entity_text: str) -> bool:
+        """More relaxed person entity validation."""
+        # Should contain at least one letter
+        if not any(c.isalpha() for c in entity_text):
             return False
         
-        # Should not be all caps (likely not a person name)
-        if entity_text.isupper() and len(entity_text) > 3:
-            return False
-        
-        # Should not contain numbers (for names)
-        if any(c.isdigit() for c in entity_text):
+        # Allow entities with numbers (like "Dr David Wilmore" - the Dr might be split)
+        # Just check it's not ALL numbers
+        if entity_text.replace(' ', '').isdigit():
             return False
         
         return True
 
-    def _validate_place_or_org_entity(self, entity_text: str) -> bool:
-        """Validate place or organisation entities."""
-        # Should contain at least one capital letter
-        if not any(c.isupper() for c in entity_text):
+    def _validate_place_or_org_entity_relaxed(self, entity_text: str) -> bool:
+        """More relaxed place/org entity validation."""
+        # Should contain at least one letter
+        if not any(c.isalpha() for c in entity_text):
             return False
         
         # Should not be just punctuation
@@ -520,6 +556,8 @@ class LightweightEntityLinker:
         
         # Define keyword patterns for different semantic categories
         categories = {
+            'theater': ['theatre', 'theater', 'stage', 'performance', 'drama', 'play', 'actor', 'director', 'backstage', 'curtain', 'scenery', 'props', 'lighting', 'costume', 'rehearsal', 'audience', 'applause', 'intermission', 'act', 'scene'],
+            'architecture': ['building', 'construction', 'design', 'structure', 'floor', 'wall', 'ceiling', 'basement', 'mezzanine', 'platform', 'bridge', 'timber', 'wood', 'carpenter', 'architectural'],
             'business': ['company', 'corporation', 'business', 'industry', 'market', 'sales', 'revenue', 'profit', 'ceo', 'founder', 'startup', 'enterprise', 'commercial', 'financial', 'investment', 'merger', 'acquisition'],
             'politics': ['government', 'political', 'election', 'policy', 'minister', 'president', 'parliament', 'congress', 'senate', 'mayor', 'governor', 'ambassador', 'diplomat', 'treaty', 'legislation', 'vote', 'campaign'],
             'entertainment': ['movie', 'film', 'actor', 'actress', 'music', 'band', 'concert', 'show', 'entertainment', 'hollywood', 'celebrity', 'director', 'producer', 'album', 'song', 'theatre', 'performance'],
@@ -560,16 +598,13 @@ class LightweightEntityLinker:
         keywords.extend(words)
         
         # Add some common important terms
-        important_terms = ['company', 'organization', 'university', 'hospital', 'government', 'technology', 'research', 'development', 'market', 'industry']
+        important_terms = ['theatre', 'stage', 'company', 'organization', 'university', 'hospital', 'government', 'technology', 'research', 'development', 'market', 'industry']
         for term in important_terms:
             if term in context.lower():
                 keywords.append(term)
         
         return list(set(keywords))[:5]  # Return top 5 unique keywords
 
-    import pycountry
-    from typing import List, Dict, Any
-    
     def _detect_geographical_context(self, text: str, entities: List[Dict[str, Any]]) -> List[str]:
         """Detect geographical context from the text using pycountry for countries."""
         context_clues = []
@@ -587,18 +622,18 @@ class LightweightEntityLinker:
             names.add(country.alpha_2.lower())
             names.add(country.alpha_3.lower())
             country_name_map[country.name.lower()] = names
-    
+
         # Flatten the name map into a lookup for matching
         flat_country_lookup = {}
         for canonical, variants in country_name_map.items():
             for v in variants:
                 flat_country_lookup[v] = canonical
-    
+
         # Check if any known country names are in the text
         for variant, canonical in flat_country_lookup.items():
             if f" {variant} " in f" {text_lower} " and canonical not in context_clues:
                 context_clues.append(canonical)
-    
+
         # Add GPE/LOCATION entities if they match a known country
         for entity in entities:
             if entity['type'] in ['GPE', 'LOCATION']:
@@ -607,9 +642,8 @@ class LightweightEntityLinker:
                     canonical = flat_country_lookup[entity_lower]
                     if canonical not in context_clues:
                         context_clues.append(canonical)
-    
-        return context_clues[:3]
 
+        return context_clues[:3]
 
     def get_coordinates(self, entities):
         """Enhanced coordinate lookup with geographical context detection."""
@@ -640,9 +674,9 @@ class LightweightEntityLinker:
         """Try geocoding with geographical context using pycountry."""
         if not context_clues:
             return False
-    
+
         search_variations = [entity['text']]
-    
+
         # Use pycountry to get standard country names
         country_names = {c.name.lower(): c.name for c in pycountry.countries}
         # Add common aliases if needed
@@ -655,7 +689,7 @@ class LightweightEntityLinker:
             'wales': 'United Kingdom',
             'britain': 'United Kingdom'
         }
-    
+
         # Add city-specific context manually if needed
         city_overrides = {
             'london': ['London, United Kingdom'],
@@ -664,7 +698,7 @@ class LightweightEntityLinker:
             'tokyo': ['Tokyo, Japan'],
             'sydney': ['Sydney, Australia'],
         }
-    
+
         for context in context_clues:
             context_lower = context.lower()
             # First, handle city-specific overrides
@@ -676,10 +710,10 @@ class LightweightEntityLinker:
                 resolved_name = aliases.get(context_lower) or country_names.get(context_lower)
                 if resolved_name:
                     search_variations.append(f"{entity['text']}, {resolved_name}")
-    
+
         # Remove duplicates while preserving order
         search_variations = list(dict.fromkeys(search_variations))
-    
+
         # Try OpenStreetMap with top 3 context variations
         for search_term in search_variations[:3]:
             try:
@@ -691,7 +725,7 @@ class LightweightEntityLinker:
                     'addressdetails': 1
                 }
                 headers = {'User-Agent': 'EntityLinker/1.0'}
-    
+
                 response = requests.get(url, params=params, headers=headers, timeout=10)
                 if response.status_code == 200:
                     data = response.json()
@@ -703,13 +737,12 @@ class LightweightEntityLinker:
                         entity['geocoding_source'] = 'openstreetmap_contextual'
                         entity['search_term_used'] = search_term
                         return True
-    
+
                 time.sleep(0.3)  # Be kind to the API
             except Exception:
                 continue
-    
-        return False
 
+        return False
     
     def _try_direct_geocoding(self, entity):
         """Try direct geocoding without context."""
@@ -742,7 +775,7 @@ class LightweightEntityLinker:
 
     def link_to_wikidata(self, entities):
         """Add Wikidata linking with enhanced context and type validation using 'instance of'."""
-    
+
         # General Wikidata QIDs for broad types
         entity_type_superclasses = {
             'PERSON': {'Q5', 'Q22989102'},           # Human, mythological figure
@@ -750,11 +783,11 @@ class LightweightEntityLinker:
             'LOCATION': {'Q82794', 'Q2221906'},       # Human settlement, geographic location
             'ORGANIZATION': {'Q43229', 'Q783794'}     # Organization, company
         }
-    
+
         for entity in entities:
             try:
                 url = "https://www.wikidata.org/w/api.php"
-    
+
                 # Construct search terms
                 search_terms = [entity['text']]
                 if entity['type'] == 'PERSON':
@@ -765,11 +798,11 @@ class LightweightEntityLinker:
                 elif entity['type'] in ['LOCATION', 'GPE']:
                     search_terms.append(f"{entity['text']} place")
                     search_terms.append(f"{entity['text']} location")
-    
+
                 if entity.get('context_keywords'):
                     for keyword in entity['context_keywords'][:2]:
                         search_terms.append(f"{entity['text']} {keyword}")
-    
+
                 # Try up to 3 variations
                 for search_term in search_terms[:3]:
                     params = {
@@ -780,35 +813,35 @@ class LightweightEntityLinker:
                         'limit': 1,
                         'type': 'item'
                     }
-    
+
                     response = requests.get(url, params=params, timeout=5)
                     if response.status_code != 200:
                         continue
-    
+
                     data = response.json()
                     if not data.get('search'):
                         continue
-    
+
                     result = data['search'][0]
                     entity_qid = result['id']
-    
+
                     # Retrieve full data for 'instance of'
                     detail_url = f"https://www.wikidata.org/wiki/Special:EntityData/{entity_qid}.json"
                     detail_response = requests.get(detail_url, timeout=5)
                     if detail_response.status_code != 200:
                         continue
-    
+
                     entity_data = detail_response.json()
                     claims = entity_data.get('entities', {}).get(entity_qid, {}).get('claims', {})
                     instance_of = claims.get('P31', [])
-    
+
                     # Get all 'instance of' QIDs
                     instance_qs = {
                         claim['mainsnak']['datavalue']['value']['id']
                         for claim in instance_of
                         if 'datavalue' in claim['mainsnak']
                     }
-    
+
                     # Validate type
                     allowed_qs = entity_type_superclasses.get(entity['type'], set())
                     if instance_qs & allowed_qs:
@@ -823,15 +856,14 @@ class LightweightEntityLinker:
                         entity['wikidata_description'] = result.get('description', '')
                         entity['wikidata_label'] = result.get('label', '')
                         entity['wikidata_note'] = 'Type mismatch; fallback used'
-                        break  # You can skip this break if you want to keep searching for better matches
-    
-                time.sleep(0.1)  # Rate limiting
-    
-            except Exception:
-                continue  # Fail silently but proceed to the next entity
-    
-        return entities
+                        break
 
+                time.sleep(0.1)  # Rate limiting
+
+            except Exception:
+                continue
+
+        return entities
 
     def link_to_wikipedia(self, entities):
         """Add Wikipedia linking for entities without Wikidata links."""
@@ -1237,13 +1269,13 @@ class StreamlitEntityLinker:
             help="This will be used for naming output files"
         )
         
-        # Sample text for demonstration
-        sample_text = """The Persian learned men say that the Phoenicians were the cause of the dispute. These (they say) came to our seas from the sea which is called Red,1 and having settled in the country which they still occupy, at once began to make long voyages. Among other places to which they carried Egyptian and Assyrian merchandise, they came to Argos, [2] which was at that time preeminent in every way among the people of what is now called Hellas. The Phoenicians came to Argos, and set out their cargo. [3] On the fifth or sixth day after their arrival, when their wares were almost all sold, many women came to the shore and among them especially the daughter of the king, whose name was Io (according to Persians and Greeks alike), the daughter of Inachus. [4] As these stood about the stern of the ship bargaining for the wares they liked, the Phoenicians incited one another to set upon them. Most of the women escaped: Io and others were seized and thrown into the ship, which then sailed away for Egypt. 2."""
+        # Default text is now the theatre text
+        default_text = """Recording the Whitechapel Pavilion in 1961. 191-193 Whitechapel Road. theatre. It was a dauntingly complex task, as to my (then) untrained eye, it appeared to be an impenetrable forest of heavy timbers, movable platforms and hoisting gear, looking like the combined wreckage of half a dozen windmills! I started by chalking an individual number on every stage joistin an attempt to provide myself with a simple skeleton on which to hang the more complicated details. Richard Southern's explanations enabled me to allocate names to the various pieces of apparatus, correcting my guesses. ('Stage basement' for example was, I learned, an imprecise way of naming a space with three distinct levels). He also gave me a brilliant introduction to the workings of a traditional wood stage and to the theatric purposes each part fulfilled. The attached sketch attempts to give a summary view of the entire substage. It is set at the first level below the stage, with the proscenium wall at the top and the back wall of the stage house at the bottom. In the terminology of the traditional wood stage, this is the 'mezzanine', from which level, all the substage machinery was worked by an army of stage hands. In the centre, the heavily outlined rectangle is the 'cellar', deeper by about 7ft below the mezzanine floor. Housed in the cellar are a variety of vertically movable platforms designed to move pieces of scenery and complete set pieces. It may be observed at this point that not all of this apparatus will have resulted from one build. A wood stage had the great advantage that it could be adapted at short notice by the stage carpenter to meet the demands of a particular production. The substage, as seen, represents a particular moment in its active life. There are five fast rise or 'star' traps for the sudden appearance (or disappearance) of individual performers (clowns, etc) through the stage floor. The three traps nearest to the audience are 'two post' traps, rather primitive and capable of causing serious injury to an inexpert user. Upstage of these are two of the more advanced and marginally safer 'four post' traps. In both types, the performer stood on a box-like counter-weighted platform with his (usually his) head touching the centre of a 'star' of leather-hinged wood segments. Beefy stage hands pulled suddenly (but with split second timing) on the lines supporting the box, shooting him through the star. In an instant, it closed behind him, leaving no visible aperture in the stage surface. Farther upstage is a row of 'sloats', designed to hold scenic flats, to be slid up through the stage floor. Next comes a grave trap which, as the name suggests, can provide a rectangular sinking in the stage ('Alas, poor Yorick'). Finally, a short bridge and a long bridge, to carry heavy set pieces, with or without chorus members, up through (and, when required, a bit above) the stage. These bridges were operated from whopping great drum and shaft mechanisms on the mezzanine. In order to get all these vertical movements to pass through the stage, its joists, counter-intuitively, have to span from side to side, the long span rather than the more obvious short span. This makes it possible to have removable sections '(sliders') in the stage floor, which are held level position by paddle levers at the ends. When these are released, the slider drops on to runners on the sides of the joists and are then winched off to left and right. The survey of the Pavilion stage was important at the time because it seemed to be the first time that anything of the kind had been done, however imperfectly. Since then, we have learned of complete surviving complexes at, for example, Her Majesty's theatre in London, the Citizens in Glasgow and, most importantly, the Tyne theatre in Newcastle, which has been restored to full working order twice (once after a dreadfully destructive fire) by Dr David Wilmore. Nevertheless, the loss of the archaeological evidence of the Pavilion is much to be regretted.. I can have enjoyable fantasies about witnessing an elaborate pantomime transformation scene from the mezzanine of a Victorian theatre. The place is seething with stage hands, dressers and flimsily clad chorus girls climbing on to the bridges, while the stage is shuddering, having been temporarily robbed of rigidity by the drawing off of the sliders. Orders must be observed to the letter and to the very second, but there can be no shouting, however energetically the orchestra plays. Add naked gas flames to the mix‚ That's enough!"""
         
         # Text input area
         text_input = st.text_area(
             "Enter your text here:",
-            value=sample_text,
+            value=default_text,
             height=300,
             placeholder="Paste your text here for entity extraction...",
             help="You can edit this text or replace it with your own content"
@@ -1273,7 +1305,7 @@ class StreamlitEntityLinker:
         if not analysis_title and hasattr(st.session_state, 'suggested_title'):
             analysis_title = st.session_state.suggested_title
         elif not analysis_title:
-            analysis_title = "text_analysis"
+            analysis_title = "whitechapel_pavilion_analysis"
         
         return text_input, analysis_title
 
@@ -1284,21 +1316,20 @@ class StreamlitEntityLinker:
             return
         
         # Check if we've already processed this exact text
-        import hashlib
         text_hash = hashlib.md5(text.encode()).hexdigest()
         
         if text_hash == st.session_state.last_processed_hash:
             st.info("This text has already been processed. Results shown below.")
             return
         
-        with st.spinner("Processing text with lightweight models..."):
+        with st.spinner("Processing text with improved lightweight models..."):
             try:
                 # Create a progress bar
                 progress_bar = st.progress(0)
                 status_text = st.empty()
                 
                 # Step 1: Extract entities
-                status_text.text("Extracting entities with lightweight models...")
+                status_text.text("Extracting entities with improved settings...")
                 progress_bar.progress(20)
                 entities = self.cached_extract_entities(text)
                 
@@ -1402,6 +1433,8 @@ class StreamlitEntityLinker:
                 tooltip_parts.append(f"Description: {entity['wikidata_description']}")
             elif entity.get('wikipedia_description'):
                 tooltip_parts.append(f"Description: {entity['wikipedia_description']}")
+            elif entity.get('britannica_title'):
+                tooltip_parts.append(f"Description: {entity['britannica_title']}")
             
             if entity.get('location_name'):
                 tooltip_parts.append(f"Location: {entity['location_name']}")
@@ -1451,8 +1484,19 @@ class StreamlitEntityLinker:
         
         st.header("Results")
         
-        # Statistics
-        # self.render_statistics(entities)
+        # Show quick stats
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Total Entities", len(entities))
+        with col2:
+            transformer_count = len([e for e in entities if e.get('extraction_method') == 'transformer'])
+            st.metric("Transformer-based", transformer_count)
+        with col3:
+            pattern_count = len([e for e in entities if e.get('extraction_method') == 'pattern'])
+            st.metric("Pattern-based", pattern_count)
+        with col4:
+            linked_count = len([e for e in entities if any(e.get(key) for key in ['wikidata_url', 'wikipedia_url', 'britannica_url'])])
+            st.metric("Externally Linked", linked_count)
         
         # Highlighted text
         st.subheader("Highlighted Text")
@@ -1475,7 +1519,6 @@ class StreamlitEntityLinker:
         
         with tab3:
             self.render_export_section(entities)
-
 
     def render_entity_summary(self, entities: List[Dict[str, Any]]):
         """Render a summary table of entities."""
@@ -1605,10 +1648,12 @@ class StreamlitEntityLinker:
                 "text": st.session_state.processed_text,
                 "dateCreated": str(pd.Timestamp.now().isoformat()),
                 "title": st.session_state.analysis_title,
-                "processingMethod": "Lightweight Open Source Models + Smart Patterns",
+                "processingMethod": "Improved Lightweight Open Source Models + Smart Patterns",
                 "modelInfo": {
                     "nerModel": "dslim/bert-base-NER",
-                    "patternMethods": ["email", "url", "address", "phone", "money"],
+                    "aggregationStrategy": "max",
+                    "confidenceThreshold": 0.3,
+                    "patternMethods": ["email", "url", "address", "phone", "money", "year", "title_person"],
                     "linkingSources": ["Wikidata", "Wikipedia", "Britannica", "OpenStreetMap"]
                 },
                 "entities": []
@@ -1673,7 +1718,7 @@ class StreamlitEntityLinker:
             st.download_button(
                 label="📄 Download Enhanced JSON-LD",
                 data=json_str,
-                file_name=f"{st.session_state.analysis_title}_lightweight_entities.jsonld",
+                file_name=f"{st.session_state.analysis_title}_improved_entities.jsonld",
                 mime="application/ld+json",
                 use_container_width=True
             )
@@ -1698,6 +1743,7 @@ class StreamlitEntityLinker:
                         .legend-item {{ display: inline-block; margin: 5px 10px; }}
                         .legend-color {{ width: 20px; height: 20px; display: inline-block; margin-right: 5px; border-radius: 3px; }}
                         .method-info {{ margin: 20px 0; padding: 15px; background: #e3f2fd; border-radius: 8px; }}
+                        .improvement-note {{ margin: 20px 0; padding: 15px; background: #e8f5e8; border-radius: 8px; border-left: 4px solid #4caf50; }}
                         @media (max-width: 768px) {{
                             body {{ padding: 10px; }}
                             .content {{ padding: 15px; }}
@@ -1708,7 +1754,7 @@ class StreamlitEntityLinker:
                 </head>
                 <body>
                     <div class="header">
-                        <h1>Lightweight Entity Analysis: {st.session_state.analysis_title}</h1>
+                        <h1>Improved Entity Analysis: {st.session_state.analysis_title}</h1>
                         <p>Generated on {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
                         <div class="stats">
                             <div class="stat-box">
@@ -1728,11 +1774,19 @@ class StreamlitEntityLinker:
                             </div>
                         </div>
                     </div>
+                    <div class="improvement-note">
+                        <h3>🚀 Improvements Made:</h3>
+                        <p>• <strong>Lower Confidence Threshold</strong>: Reduced from 0.6 to 0.3 for better entity capture</p>
+                        <p>• <strong>Better Aggregation</strong>: Changed to "max" strategy for multi-word entities</p>
+                        <p>• <strong>Relaxed Validation</strong>: Less restrictive entity filtering</p>
+                        <p>• <strong>Enhanced Patterns</strong>: Improved address, year, and title recognition</p>
+                        <p>• <strong>Theatre Context</strong>: Added semantic category for theatre-related content</p>
+                    </div>
                     <div class="method-info">
                         <h3>Processing Methods:</h3>
-                        <p>• <strong>Transformer NER</strong>: BERT-based model (dslim/bert-base-NER)</p>
-                        <p>• <strong>Pattern Recognition</strong>: Smart regex for emails, URLs, addresses, phones, money</p>
-                        <p>• <strong>Contextual Analysis</strong>: Semantic categorization and relationship mapping</p>
+                        <p>• <strong>Transformer NER</strong>: BERT-based model (dslim/bert-base-NER) with "max" aggregation</p>
+                        <p>• <strong>Pattern Recognition</strong>: Enhanced regex for addresses, years, titles, emails, URLs, phones, money</p>
+                        <p>• <strong>Contextual Analysis</strong>: Semantic categorization including theatre-specific terms</p>
                     </div>
                     <div class="legend">
                         <h3>Entity Types:</h3>
@@ -1743,10 +1797,10 @@ class StreamlitEntityLinker:
                     </div>
                     <div class="header">
                         <h3>Technical Details:</h3>
-                        <p>• <strong>Reliability</strong>: Uses lightweight, proven models without complex compilation</p>
-                        <p>• <strong>Performance</strong>: Fast processing with smart caching</p>
-                        <p>• <strong>Accuracy</strong>: Combines transformer NER with precise pattern matching</p>
-                        <p>• <strong>Context</strong>: Semantic analysis and entity relationship detection</p>
+                        <p>• <strong>Reliability</strong>: Uses proven models with optimized settings</p>
+                        <p>• <strong>Performance</strong>: Improved entity detection with lower false negatives</p>
+                        <p>• <strong>Accuracy</strong>: Combines improved transformer NER with precise pattern matching</p>
+                        <p>• <strong>Context</strong>: Enhanced semantic analysis and entity relationship detection</p>
                     </div>
                 </body>
                 </html>
@@ -1755,7 +1809,7 @@ class StreamlitEntityLinker:
                 st.download_button(
                     label="Download Enhanced HTML",
                     data=html_template,
-                    file_name=f"{st.session_state.analysis_title}_lightweight_entities.html",
+                    file_name=f"{st.session_state.analysis_title}_improved_entities.html",
                     mime="text/html",
                     use_container_width=True
                 )
@@ -1849,9 +1903,6 @@ class StreamlitEntityLinker:
         .main .block-container {
             background-color: #F5F0DC !important;
         }
-        .stSidebar {
-            background-color: #F5F0DC !important;
-        }
         .stSelectbox > div > div {
             background-color: white !important;
         }
@@ -1907,7 +1958,7 @@ class StreamlitEntityLinker:
         text_input, analysis_title = self.render_input_section()
         
         # Process button
-        if st.button("Process Text with Lightweight Models", type="primary", use_container_width=True):
+        if st.button("🚀 Process Text with Improved Models", type="primary", use_container_width=True):
             if text_input.strip():
                 self.process_text(text_input, analysis_title)
             else:
@@ -1933,7 +1984,7 @@ def main():
         pip install transformers torch
         pip install pandas plotly
         pip install requests
-        pip install PyYAML
+        pip install PyYAML pycountry
         """)
 
 

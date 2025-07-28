@@ -741,15 +741,22 @@ class LightweightEntityLinker:
         return False
 
     def link_to_wikidata(self, entities):
-        """Add Wikidata linking with enhanced context."""
+        """Add Wikidata linking with enhanced context and type validation using 'instance of'."""
+    
+        # General Wikidata QIDs for broad types
+        entity_type_superclasses = {
+            'PERSON': {'Q5', 'Q22989102'},           # Human, mythological figure
+            'GPE': {'Q6256'},                         # Country
+            'LOCATION': {'Q82794', 'Q2221906'},       # Human settlement, geographic location
+            'ORGANIZATION': {'Q43229', 'Q783794'}     # Organization, company
+        }
+    
         for entity in entities:
             try:
                 url = "https://www.wikidata.org/w/api.php"
-                
-                # Create enhanced search terms
+    
+                # Construct search terms
                 search_terms = [entity['text']]
-                
-                # Add type-specific search enhancements
                 if entity['type'] == 'PERSON':
                     search_terms.append(f"{entity['text']} person")
                 elif entity['type'] == 'ORGANIZATION':
@@ -758,14 +765,13 @@ class LightweightEntityLinker:
                 elif entity['type'] in ['LOCATION', 'GPE']:
                     search_terms.append(f"{entity['text']} place")
                     search_terms.append(f"{entity['text']} location")
-                
-                # Add context keywords if available
+    
                 if entity.get('context_keywords'):
                     for keyword in entity['context_keywords'][:2]:
                         search_terms.append(f"{entity['text']} {keyword}")
-                
-                # Try each search term
-                for search_term in search_terms[:3]:  # Limit to top 3
+    
+                # Try up to 3 variations
+                for search_term in search_terms[:3]:
                     params = {
                         'action': 'wbsearchentities',
                         'format': 'json',
@@ -774,22 +780,58 @@ class LightweightEntityLinker:
                         'limit': 1,
                         'type': 'item'
                     }
-                    
+    
                     response = requests.get(url, params=params, timeout=5)
-                    if response.status_code == 200:
-                        data = response.json()
-                        if data.get('search') and len(data['search']) > 0:
-                            result = data['search'][0]
-                            entity['wikidata_url'] = f"http://www.wikidata.org/entity/{result['id']}"
-                            entity['wikidata_description'] = result.get('description', '')
-                            entity['wikidata_label'] = result.get('label', '')
-                            break  # Found a match, stop searching
-                
+                    if response.status_code != 200:
+                        continue
+    
+                    data = response.json()
+                    if not data.get('search'):
+                        continue
+    
+                    result = data['search'][0]
+                    entity_qid = result['id']
+    
+                    # Retrieve full data for 'instance of'
+                    detail_url = f"https://www.wikidata.org/wiki/Special:EntityData/{entity_qid}.json"
+                    detail_response = requests.get(detail_url, timeout=5)
+                    if detail_response.status_code != 200:
+                        continue
+    
+                    entity_data = detail_response.json()
+                    claims = entity_data.get('entities', {}).get(entity_qid, {}).get('claims', {})
+                    instance_of = claims.get('P31', [])
+    
+                    # Get all 'instance of' QIDs
+                    instance_qs = {
+                        claim['mainsnak']['datavalue']['value']['id']
+                        for claim in instance_of
+                        if 'datavalue' in claim['mainsnak']
+                    }
+    
+                    # Validate type
+                    allowed_qs = entity_type_superclasses.get(entity['type'], set())
+                    if instance_qs & allowed_qs:
+                        # Valid type match
+                        entity['wikidata_url'] = f"http://www.wikidata.org/entity/{entity_qid}"
+                        entity['wikidata_description'] = result.get('description', '')
+                        entity['wikidata_label'] = result.get('label', '')
+                        break
+                    else:
+                        # Fallback with warning
+                        entity['wikidata_url'] = f"http://www.wikidata.org/entity/{entity_qid}"
+                        entity['wikidata_description'] = result.get('description', '')
+                        entity['wikidata_label'] = result.get('label', '')
+                        entity['wikidata_note'] = 'Type mismatch; fallback used'
+                        break  # You can skip this break if you want to keep searching for better matches
+    
                 time.sleep(0.1)  # Rate limiting
+    
             except Exception:
-                pass  # Continue if API call fails
-        
+                continue  # Fail silently but proceed to the next entity
+    
         return entities
+
 
     def link_to_wikipedia(self, entities):
         """Add Wikipedia linking for entities without Wikidata links."""

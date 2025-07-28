@@ -57,7 +57,48 @@ def highlight_text(text, entities):
 st.title("Named Entity Recognition with Geocoding")
 text_input = st.text_area("Enter text for entity recognition and location lookup:", height=250)
 
-if st.button("Extract Entities"):
+if "entities" not in st.session_state:
+    st.session_state.entities = []
+    st.session_state.text_input = ""
+    st.session_state.highlighted_html = ""
+
+process = st.button("Extract Entities")
+
+if process:
+    if not text_input.strip():
+        st.warning("Please enter some text.")
+    else:
+        st.session_state.text_input = text_input
+        with st.spinner("Extracting entities..."):
+            results = ner_pipeline(text_input)
+        entities = []
+        seen = set()
+        for ent in results:
+            ent_text = ent['word'].replace("##", "")
+            key = (ent_text, ent['entity_group'], ent['start'])
+            if key not in seen and ent['score'] > 0.6:
+                seen.add(key)
+                entity_info = {
+                    'text': ent_text,
+                    'type': ent['entity_group'],
+                    'start': ent['start'],
+                    'end': ent['end'],
+                    'score': round(ent['score'], 3)
+                }
+                if ent['entity_group'] in ['LOC', 'GPE']:
+                    geo = geocode_place(ent_text)
+                    entity_info.update(geo)
+                entities.append(entity_info)
+        st.session_state.entities = entities
+        st.session_state.highlighted_html = highlight_text(text_input, entities)
+
+entities = st.session_state.entities
+text_input = st.session_state.text_input
+if entities:
+    st.success(f"Found {len(entities)} entities.")
+    st.markdown("### Highlighted Text")
+    st.markdown(st.session_state.highlighted_html, unsafe_allow_html=True)
+
     if not text_input.strip():
         st.warning("Please enter some text.")
     else:
@@ -169,4 +210,3 @@ if st.button("Extract Entities"):
         </html>
         """
         st.download_button("Download Highlighted HTML", data=highlighted_html, file_name="highlighted_entities.html", mime="text/html")
-

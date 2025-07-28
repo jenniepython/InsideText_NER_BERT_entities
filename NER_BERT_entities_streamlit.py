@@ -3,23 +3,22 @@
 Streamlit Entity Linker Application with Lightweight Open Source Models
 
 A web interface for entity extraction and linking using lightweight open-source models.
-This application provides contextual entity extraction and comprehensive linking
+This application provides contextual entity extraction and linking
 to external knowledge bases using reliable, easy-to-install models.
 
-Author: Based on NER_spaCy_streamlit.py - Modified to use lightweight open-source models
-Version: 2.1 - Updated to use lightweight models without complex compilation
+Author: Jennie Williams
 """
 
 import streamlit as st
 
-# Configure Streamlit page FIRST - before any other Streamlit commands
+# Configure Streamlit page
 st.set_page_config(
-    page_title="From Text to Linked Data using Open Source Models",
+    page_title="From Text to Linked Data using Open Source Model: dslim/bert-base-NER",
     layout="centered",  
     initial_sidebar_state="collapsed" 
 )
 
-# Authentication is REQUIRED - do not run app without proper login
+# Authentication is REQUIRED
 try:
     import streamlit_authenticator as stauth
     import yaml
@@ -137,10 +136,10 @@ import urllib.parse
 
 class LightweightEntityLinker:
     """
-    Main class for lightweight open-source entity linking functionality.
+    Main class for open-source entity linking functionality.
     
     This class handles the complete pipeline from text processing to entity
-    extraction using lightweight models, validation, linking, and output generation.
+    extraction using the dslim/bert-base-NER model, validation, linking, and output generation.
     """
     
     def __init__(self):
@@ -169,11 +168,11 @@ class LightweightEntityLinker:
         self._load_models()
 
     def _load_models(self):
-        """Load lightweight models for entity extraction."""
+        """Load model for entity extraction."""
         try:
             from transformers import pipeline
             
-            # Load lightweight NER model
+            # Load NER model
             with st.spinner("Loading NER model..."):
                 try:
                     # Use a lighter, pre-compiled model that doesn't require compilation
@@ -213,7 +212,7 @@ class LightweightEntityLinker:
         return context_info
 
     def extract_entities(self, text: str):
-        """Extract named entities from text using lightweight models and patterns."""
+        """Extract named entities from text using dslim/bert-base-NER model and patterns."""
         entities = []
         
         # Try transformer-based NER if available
@@ -567,57 +566,49 @@ class LightweightEntityLinker:
         
         return list(set(keywords))[:5]  # Return top 5 unique keywords
 
+    import pycountry
+    from typing import List, Dict, Any
+    
     def _detect_geographical_context(self, text: str, entities: List[Dict[str, Any]]) -> List[str]:
-        """Detect geographical context from the text to improve geocoding accuracy."""
+        """Detect geographical context from the text using pycountry for countries."""
         context_clues = []
         text_lower = text.lower()
         
-        # Major locations mentioned in the text
-        major_locations = {
-            'uk': ['uk', 'united kingdom', 'britain', 'great britain', 'england', 'scotland', 'wales'],
-            'usa': ['usa', 'united states', 'america', 'us ', 'united states of america'],
-            'canada': ['canada'],
-            'australia': ['australia'],
-            'france': ['france'],
-            'germany': ['germany'],
-            'italy': ['italy'],
-            'spain': ['spain'],
-            'japan': ['japan'],
-            'china': ['china'],
-            'india': ['india'],
-            'london': ['london'],
-            'new york': ['new york', 'nyc', 'manhattan'],
-            'paris': ['paris'],
-            'tokyo': ['tokyo'],
-            'sydney': ['sydney'],
-            'toronto': ['toronto'],
-            'berlin': ['berlin'],
-            'rome': ['rome'],
-            'madrid': ['madrid'],
-            'beijing': ['beijing'],
-            'mumbai': ['mumbai'],
-            'los angeles': ['los angeles', 'la ', ' la,'],
-            'chicago': ['chicago'],
-            'boston': ['boston'],
-        }
-        
-        # Check for explicit mentions
-        for location, patterns in major_locations.items():
-            for pattern in patterns:
-                if pattern in text_lower:
-                    context_clues.append(location)
-                    break
-        
-        # Extract from entities that are places
+        # Create a lookup set of country names and common variations
+        country_name_map = {}
+        for country in pycountry.countries:
+            names = {country.name.lower()}
+            if hasattr(country, 'official_name'):
+                names.add(country.official_name.lower())
+            if hasattr(country, 'common_name'):
+                names.add(country.common_name.lower())
+            # Add short alpha_2 and alpha_3 codes for robustness
+            names.add(country.alpha_2.lower())
+            names.add(country.alpha_3.lower())
+            country_name_map[country.name.lower()] = names
+    
+        # Flatten the name map into a lookup for matching
+        flat_country_lookup = {}
+        for canonical, variants in country_name_map.items():
+            for v in variants:
+                flat_country_lookup[v] = canonical
+    
+        # Check if any known country names are in the text
+        for variant, canonical in flat_country_lookup.items():
+            if f" {variant} " in f" {text_lower} " and canonical not in context_clues:
+                context_clues.append(canonical)
+    
+        # Add GPE/LOCATION entities if they match a known country
         for entity in entities:
             if entity['type'] in ['GPE', 'LOCATION']:
-                entity_lower = entity['text'].lower()
-                for location, patterns in major_locations.items():
-                    if entity_lower in patterns or any(p in entity_lower for p in patterns):
-                        if location not in context_clues:
-                            context_clues.append(location)
-        
-        return context_clues[:3]  # Return top 3 context clues
+                entity_lower = entity['text'].strip().lower()
+                if entity_lower in flat_country_lookup:
+                    canonical = flat_country_lookup[entity_lower]
+                    if canonical not in context_clues:
+                        context_clues.append(canonical)
+    
+        return context_clues[:3]
+
 
     def get_coordinates(self, entities):
         """Enhanced coordinate lookup with geographical context detection."""
@@ -645,38 +636,51 @@ class LightweightEntityLinker:
         return entities
     
     def _try_contextual_geocoding(self, entity, context_clues):
-        """Try geocoding with geographical context."""
+        """Try geocoding with geographical context using pycountry."""
         if not context_clues:
             return False
-        
-        # Create context-aware search terms
+    
         search_variations = [entity['text']]
-        
-        # Add context to search terms
+    
+        # Use pycountry to get standard country names
+        country_names = {c.name.lower(): c.name for c in pycountry.countries}
+        # Add common aliases if needed
+        aliases = {
+            'uk': 'United Kingdom',
+            'usa': 'United States',
+            'us': 'United States',
+            'england': 'United Kingdom',
+            'scotland': 'United Kingdom',
+            'wales': 'United Kingdom',
+            'britain': 'United Kingdom'
+        }
+    
+        # Add city-specific context manually if needed
+        city_overrides = {
+            'london': ['London, United Kingdom'],
+            'new york': ['New York, United States'],
+            'paris': ['Paris, France'],
+            'tokyo': ['Tokyo, Japan'],
+            'sydney': ['Sydney, Australia'],
+        }
+    
         for context in context_clues:
-            context_mapping = {
-                'uk': ['UK', 'United Kingdom', 'England', 'Britain'],
-                'usa': ['USA', 'United States', 'US'],
-                'canada': ['Canada'],
-                'australia': ['Australia'],
-                'france': ['France'],
-                'germany': ['Germany'],
-                'london': ['London, UK', 'London, England'],
-                'new york': ['New York, USA', 'New York, NY'],
-                'paris': ['Paris, France'],
-                'tokyo': ['Tokyo, Japan'],
-                'sydney': ['Sydney, Australia'],
-            }
-            
-            context_variants = context_mapping.get(context, [context])
-            for variant in context_variants:
-                search_variations.append(f"{entity['text']}, {variant}")
-        
+            context_lower = context.lower()
+            # First, handle city-specific overrides
+            if context_lower in city_overrides:
+                for variant in city_overrides[context_lower]:
+                    search_variations.append(f"{entity['text']}, {variant}")
+            else:
+                # Then try to map country aliases or resolve via pycountry
+                resolved_name = aliases.get(context_lower) or country_names.get(context_lower)
+                if resolved_name:
+                    search_variations.append(f"{entity['text']}, {resolved_name}")
+    
         # Remove duplicates while preserving order
         search_variations = list(dict.fromkeys(search_variations))
-        
-        # Try OpenStreetMap with context
-        for search_term in search_variations[:3]:  # Try top 3 with OSM
+    
+        # Try OpenStreetMap with top 3 context variations
+        for search_term in search_variations[:3]:
             try:
                 url = "https://nominatim.openstreetmap.org/search"
                 params = {
@@ -686,7 +690,7 @@ class LightweightEntityLinker:
                     'addressdetails': 1
                 }
                 headers = {'User-Agent': 'EntityLinker/1.0'}
-            
+    
                 response = requests.get(url, params=params, headers=headers, timeout=10)
                 if response.status_code == 200:
                     data = response.json()
@@ -695,15 +699,16 @@ class LightweightEntityLinker:
                         entity['latitude'] = float(result['lat'])
                         entity['longitude'] = float(result['lon'])
                         entity['location_name'] = result['display_name']
-                        entity['geocoding_source'] = f'openstreetmap_contextual'
+                        entity['geocoding_source'] = 'openstreetmap_contextual'
                         entity['search_term_used'] = search_term
                         return True
-            
-                time.sleep(0.3)  # Rate limiting
+    
+                time.sleep(0.3)  # Be kind to the API
             except Exception:
                 continue
-        
+    
         return False
+
     
     def _try_direct_geocoding(self, entity):
         """Try direct geocoding without context."""
@@ -1072,7 +1077,7 @@ class StreamlitEntityLinker:
             if os.path.exists(logo_path):
                 st.image(logo_path, width=300)
             else:
-                st.info("💡 Place your logo.png file in the same directory as this app to display it here")
+                st.info("Place your logo.png file in the same directory as this app to display it here")
         except Exception as e:
             st.warning(f"Could not load logo: {e}")        
         

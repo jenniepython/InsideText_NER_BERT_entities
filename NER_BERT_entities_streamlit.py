@@ -133,6 +133,7 @@ import re
 import time
 import requests
 import urllib.parse
+import pycountry
 
 class LightweightEntityLinker:
     """

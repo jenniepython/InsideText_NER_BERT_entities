@@ -5,5 +5,7 @@ numpy
 pandas
 requests
 streamlit-authenticator
+folium 
+streamlit-folium
 plotly
 pyyaml

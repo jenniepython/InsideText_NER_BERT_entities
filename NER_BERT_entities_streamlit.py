@@ -203,7 +203,6 @@ class LightweightEntityLinker:
         """Generate contextual analysis using rule-based approaches."""
         context_info = {
             'sentence_context': self._extract_sentence_context({'text': entity_text, 'start': text.find(entity_text), 'end': text.find(entity_text) + len(entity_text)}, text),
-            'semantic_category': self._determine_semantic_category_from_context(entity_text, entity_type, text),
             'context_keywords': self._extract_context_keywords(entity_text, text),
             'entity_frequency': text.lower().count(entity_text.lower()),
             'surrounding_entities': []
@@ -212,57 +211,61 @@ class LightweightEntityLinker:
         return context_info
 
     def extract_entities(self, text: str):
-            """Extract named entities with minimal filtering to see what BERT actually finds."""
-            entities = []
-            
-            # Try transformer-based NER if available
-            if self.ner_pipeline:
-                try:
-                    raw_entities = self.ner_pipeline(text)
+        """Extract named entities with improved settings."""
+        entities = []
+        
+        # Try transformer-based NER if available
+        if self.ner_pipeline:
+            try:
+                raw_entities = self.ner_pipeline(text)
+                
+                # DEBUG: Print what transformer finds
+                print("DEBUG - Raw entities from transformer:")
+                for ent in raw_entities:
+                    print(f"  '{ent['word']}' ({ent['entity_group']}) - confidence: {ent['score']:.3f}")
+                
+                # Process transformer entities with LOWER confidence threshold
+                for ent in raw_entities:
+                    entity_type = self._map_entity_type(ent['entity_group'])
                     
-                    # Process transformer entities with MINIMAL filtering
-                    for ent in raw_entities:
-                        entity_type = self._map_entity_type(ent['entity_group'])
-                        
-                        # REMOVE confidence threshold temporarily - keep everything!
-                        # if ent['score'] < 0.3:
-                        #     continue
-                        
-                        entity_text = ent['word'].strip()
-                        
-                        # REMOVE validation temporarily - keep everything!
-                        # Skip only completely empty entities
-                        if len(entity_text) == 0:
-                            continue
-                        
-                        # Create entity dictionary
-                        entity = {
-                            'text': entity_text,
-                            'type': entity_type,
-                            'start': ent['start'],
-                            'end': ent['end'],
-                            'confidence': ent['score'],
-                            'original_label': ent['entity_group'],
-                            'extraction_method': 'transformer'
-                        }
-                        
-                        # Add contextual information
-                        context_info = self._generate_contextual_analysis(text, entity_text, entity_type)
-                        entity.update(context_info)
-                        
+                    # LOWER confidence threshold - many valid entities have 0.3-0.6 confidence
+                    if ent['score'] < 0.3:  # Changed from 0.6 to 0.3
+                        continue
+                    
+                    # Better entity text handling
+                    entity_text = ent['word'].strip()
+                    
+                    # Create entity dictionary
+                    entity = {
+                        'text': entity_text,
+                        'type': entity_type,
+                        'start': ent['start'],
+                        'end': ent['end'],
+                        'confidence': ent['score'],
+                        'original_label': ent['entity_group'],
+                        'extraction_method': 'transformer'
+                    }
+                    
+                    # Add contextual information
+                    context_info = self._generate_contextual_analysis(text, entity_text, entity_type)
+                    entity.update(context_info)
+                    
+                    # LESS restrictive validation
+                    if self._is_valid_entity_relaxed(entity, text):
                         entities.append(entity)
-                            
-                except Exception as e:
-                    st.warning(f"Transformer NER failed: {e}")
-            
-            # Don't add pattern entities for now - just see what BERT finds
-            # pattern_entities = self._extract_pattern_entities_improved(text)
-            # entities.extend(pattern_entities)
-            
-            # Remove overlapping entities
-            entities = self._remove_overlapping_entities(entities)
-            
-            return entities
+                        
+            except Exception as e:
+                st.warning(f"Transformer NER failed: {e}")
+                # Continue with pattern-based extraction
+        
+        # Always add pattern-based extraction
+        pattern_entities = self._extract_pattern_entities_improved(text)
+        entities.extend(pattern_entities)
+        
+        # Remove overlapping entities
+        entities = self._remove_overlapping_entities(entities)
+        
+        return entities
 
     def _map_entity_type(self, ner_label: str) -> str:
         """Map NER model labels to our standardised types."""
@@ -537,45 +540,6 @@ class LightweightEntityLinker:
         start = max(0, entity['start'] - 100)
         end = min(len(text), entity['end'] + 100)
         return text[start:end].strip()
-
-    def _determine_semantic_category_from_context(self, entity_text: str, entity_type: str, text: str) -> str:
-        """Determine semantic category based on context."""
-        # Get context around the entity
-        entity_pos = text.lower().find(entity_text.lower())
-        if entity_pos == -1:
-            return 'general'
-        
-        # Extract surrounding text
-        start = max(0, entity_pos - 150)
-        end = min(len(text), entity_pos + len(entity_text) + 150)
-        context = text[start:end].lower()
-        
-        # Define keyword patterns for different semantic categories
-        categories = {
-            'theater': ['theatre', 'theater', 'stage', 'performance', 'drama', 'play', 'actor', 'director', 'backstage', 'curtain', 'scenery', 'props', 'lighting', 'costume', 'rehearsal', 'audience', 'applause', 'intermission', 'act', 'scene'],
-            'architecture': ['building', 'construction', 'design', 'structure', 'floor', 'wall', 'ceiling', 'basement', 'mezzanine', 'platform', 'bridge', 'timber', 'wood', 'carpenter', 'architectural'],
-            'business': ['company', 'corporation', 'business', 'industry', 'market', 'sales', 'revenue', 'profit', 'ceo', 'founder', 'startup', 'enterprise', 'commercial', 'financial', 'investment', 'merger', 'acquisition'],
-            'politics': ['government', 'political', 'election', 'policy', 'minister', 'president', 'parliament', 'congress', 'senate', 'mayor', 'governor', 'ambassador', 'diplomat', 'treaty', 'legislation', 'vote', 'campaign'],
-            'entertainment': ['movie', 'film', 'actor', 'actress', 'music', 'band', 'concert', 'show', 'entertainment', 'hollywood', 'celebrity', 'director', 'producer', 'album', 'song', 'theatre', 'performance'],
-            'sports': ['team', 'player', 'game', 'match', 'sport', 'league', 'championship', 'tournament', 'coach', 'stadium', 'olympics', 'football', 'basketball', 'soccer', 'tennis', 'golf', 'baseball'],
-            'academic': ['university', 'research', 'study', 'professor', 'academic', 'education', 'school', 'college', 'student', 'degree', 'dissertation', 'journal', 'publication', 'conference', 'scholar'],
-            'technology': ['technology', 'software', 'computer', 'digital', 'internet', 'tech', 'innovation', 'app', 'platform', 'startup', 'ai', 'artificial intelligence', 'machine learning', 'blockchain', 'cloud'],
-            'healthcare': ['hospital', 'medical', 'health', 'doctor', 'patient', 'treatment', 'medicine', 'pharmaceutical', 'clinic', 'surgery', 'therapy', 'diagnosis', 'healthcare', 'medical center'],
-            'travel': ['travel', 'tourism', 'hotel', 'airport', 'flight', 'vacation', 'destination', 'airline', 'resort', 'booking', 'trip', 'journey', 'passenger', 'tourist']
-        }
-        
-        # Score each category
-        category_scores = {}
-        for category, keywords in categories.items():
-            score = sum(1 for keyword in keywords if keyword in context)
-            if score > 0:
-                category_scores[category] = score
-        
-        # Return category with highest score
-        if category_scores:
-            return max(category_scores, key=category_scores.get)
-        
-        return 'general'
 
     def _extract_context_keywords(self, entity_text: str, text: str) -> List[str]:
         """Extract relevant keywords from the context around an entity."""
@@ -1078,7 +1042,7 @@ class LightweightEntityLinker:
             confidence_boost += 0.1
         
         # Check semantic category confidence
-        if entity.get('semantic_category') and entity['semantic_category'] != 'general':
+        if entity.get('context_keywords'):
             confidence_boost += 0.1
         
         # Check extraction method confidence
@@ -1416,9 +1380,6 @@ class StreamlitEntityLinker:
             # Create enhanced tooltip
             tooltip_parts = [f"Type: {entity['type']}"]
             
-            if entity.get('semantic_category'):
-                tooltip_parts.append(f"Category: {entity['semantic_category']}")
-            
             if entity.get('context_confidence'):
                 tooltip_parts.append(f"Confidence: {float(entity['context_confidence']):.2f}")
             
@@ -1529,7 +1490,6 @@ class StreamlitEntityLinker:
                 'Entity': entity['text'],
                 'Type': entity['type'],
                 'Method': entity.get('extraction_method', 'unknown'),
-                'Category': entity.get('semantic_category', 'general'),
                 'Confidence': f"{float(entity.get('context_confidence', 0)):.2f}",
                 'Links': self.format_entity_links(entity),
                 'Context': entity.get('sentence_context', '')[:100] + "..." if entity.get('sentence_context', '') else ""
@@ -1547,7 +1507,7 @@ class StreamlitEntityLinker:
             return
         
         # Filter options
-        col1, col2, col3 = st.columns(3)
+        col1, col2 = st.columns(2)
         
         with col1:
             type_filter = st.selectbox(
@@ -1561,20 +1521,12 @@ class StreamlitEntityLinker:
                 ["All"] + list(set(e.get('extraction_method', 'unknown') for e in entities))
             )
         
-        with col3:
-            category_filter = st.selectbox(
-                "Filter by Category",
-                ["All"] + list(set(e.get('semantic_category', 'general') for e in entities))
-            )
-        
         # Apply filters
         filtered_entities = entities
         if type_filter != "All":
             filtered_entities = [e for e in filtered_entities if e['type'] == type_filter]
         if method_filter != "All":
             filtered_entities = [e for e in filtered_entities if e.get('extraction_method') == method_filter]
-        if category_filter != "All":
-            filtered_entities = [e for e in filtered_entities if e.get('semantic_category') == category_filter]
         
         # Display detailed information for each entity
         for i, entity in enumerate(filtered_entities):
@@ -1585,7 +1537,6 @@ class StreamlitEntityLinker:
                     st.write("**Basic Information:**")
                     st.write(f"- Type: {entity['type']}")
                     st.write(f"- Method: {entity.get('extraction_method', 'unknown')}")
-                    st.write(f"- Category: {entity.get('semantic_category', 'general')}")
                     st.write(f"- Confidence: {float(entity.get('context_confidence', 0)):.2f}")
                     st.write(f"- Position: {entity['start']}-{entity['end']}")
                     
@@ -1664,7 +1615,6 @@ class StreamlitEntityLinker:
                     "endOffset": entity['end'],
                     "confidence": entity.get('context_confidence', 0),
                     "extractionMethod": entity.get('extraction_method', 'unknown'),
-                    "semanticCategory": entity.get('semantic_category', 'general'),
                     "contextualInformation": {
                         "sentenceContext": entity.get('sentence_context', ''),
                         "contextKeywords": entity.get('context_keywords', []),
@@ -1824,7 +1774,6 @@ class StreamlitEntityLinker:
                     'Type': entity['type'],
                     'Method': entity.get('extraction_method', 'unknown'),
                     'Confidence': entity.get('context_confidence', 0),
-                    'Category': entity.get('semantic_category', 'general'),
                     'Start': entity['start'],
                     'End': entity['end'],
                     'Wikipedia': entity.get('wikipedia_url', ''),
@@ -1867,7 +1816,6 @@ class StreamlitEntityLinker:
                             "name": entity['text'],
                             "type": entity['type'],
                             "method": entity.get('extraction_method', 'unknown'),
-                            "category": entity.get('semantic_category', 'general'),
                             "confidence": entity.get('context_confidence', 0),
                             "description": entity.get('wikidata_description') or entity.get('wikipedia_description', ''),
                             "context": entity.get('sentence_context', ''),

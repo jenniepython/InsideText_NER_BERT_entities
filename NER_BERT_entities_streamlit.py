@@ -229,8 +229,8 @@ class LightweightEntityLinker:
                     entity_type = self._map_entity_type(ent['entity_group'])
                     
                     # LOWER confidence threshold - many valid entities have 0.3-0.6 confidence
-                    if ent['score'] < 0.3:  # Changed from 0.6 to 0.3
-                        continue
+                    #if ent['score'] < 0.3:  # Changed from 0.6 to 0.3
+                    #    continue
                     
                     # Better entity text handling
                     entity_text = ent['word'].strip()
@@ -1902,7 +1902,7 @@ class StreamlitEntityLinker:
         text_input, analysis_title = self.render_input_section()
         
         # Process button
-        if st.button("🚀 Process Text with Improved Models", type="primary", use_container_width=True):
+        if st.button("Process Text", type="primary", use_container_width=True):
             if text_input.strip():
                 self.process_text(text_input, analysis_title)
             else:

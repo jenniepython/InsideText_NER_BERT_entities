@@ -219,18 +219,9 @@ class LightweightEntityLinker:
             try:
                 raw_entities = self.ner_pipeline(text)
                 
-                # DEBUG: Print what transformer finds
-                print("DEBUG - Raw entities from transformer:")
-                for ent in raw_entities:
-                    print(f"  '{ent['word']}' ({ent['entity_group']}) - confidence: {ent['score']:.3f}")
-                
                 # Process transformer entities with LOWER confidence threshold
                 for ent in raw_entities:
                     entity_type = self._map_entity_type(ent['entity_group'])
-                    
-                    # LOWER confidence threshold - many valid entities have 0.3-0.6 confidence
-                    #if ent['score'] < 0.3:  # Changed from 0.6 to 0.3
-                    #    continue
                     
                     # Better entity text handling
                     entity_text = ent['word'].strip()
@@ -350,7 +341,7 @@ class LightweightEntityLinker:
         # IMPROVED Address patterns - more flexible
         address_patterns = [
             # Handle ranges like "191-193" with different dashes
-            r'\b\d{1,5}[-–—]\d{1,5}\s+[A-Z][a-zA-Z\s]+(?:Road|Street|Avenue|Lane|Drive|Way|Place|Square|Gardens|Court|Close|Crescent|Boulevard|Terrace)\b',
+            r'\b\d{1,5}[-â€"â€"]\d{1,5}\s+[A-Z][a-zA-Z\s]+(?:Road|Street|Avenue|Lane|Drive|Way|Place|Square|Gardens|Court|Close|Crescent|Boulevard|Terrace)\b',
             # Regular numbered addresses
             r'\b\d{1,5}\s+[A-Z][a-zA-Z\s]+(?:Road|Street|Avenue|Lane|Drive|Way|Place|Square|Gardens|Court|Close|Crescent|Boulevard|Terrace)\b',
             # Handle cases without numbers but clear street names
@@ -407,8 +398,8 @@ class LightweightEntityLinker:
         # Money patterns
         money_patterns = [
             r'\$\d{1,3}(?:,\d{3})*(?:\.\d{2})?',
-            r'£\d{1,3}(?:,\d{3})*(?:\.\d{2})?',
-            r'€\d{1,3}(?:,\d{3})*(?:\.\d{2})?',
+            r'Â£\d{1,3}(?:,\d{3})*(?:\.\d{2})?',
+            r'â‚¬\d{1,3}(?:,\d{3})*(?:\.\d{2})?',
             r'\b\d{1,3}(?:,\d{3})*(?:\.\d{2})?\s*(?:dollars|USD|pounds|GBP|euros|EUR)\b'
         ]
         
@@ -711,27 +702,65 @@ class LightweightEntityLinker:
             params = {
                 'q': entity['text'],
                 'format': 'json',
-                'limit': 1,
-                'addressdetails': 1
+                'limit': 3,
+                'addressdetails': 1,
+                'extratags': 1,
+                'namedetails': 1
             }
-            headers = {'User-Agent': 'EntityLinker/1.0'}
+            headers = {
+                'User-Agent': 'EntityLinker/1.0 (https://example.com/contact)',
+                'Accept': 'application/json'
+            }
         
             response = requests.get(url, params=params, headers=headers, timeout=10)
+            
             if response.status_code == 200:
                 data = response.json()
                 if data:
-                    result = data[0]
-                    entity['latitude'] = float(result['lat'])
-                    entity['longitude'] = float(result['lon'])
-                    entity['location_name'] = result['display_name']
-                    entity['geocoding_source'] = 'openstreetmap'
-                    return True
+                    # Choose the best result based on importance and type
+                    best_result = self._choose_best_geocoding_result(data, entity)
+                    if best_result:
+                        entity['latitude'] = float(best_result['lat'])
+                        entity['longitude'] = float(best_result['lon'])
+                        entity['location_name'] = best_result['display_name']
+                        entity['geocoding_source'] = 'openstreetmap'
+                        entity['geocoding_confidence'] = best_result.get('importance', 0.5)
+                        return True
+            elif response.status_code == 429:
+                time.sleep(2)  # Wait longer for rate limits
         
-            time.sleep(0.3)  # Rate limiting
+            time.sleep(0.5)  # Be more respectful with rate limiting
         except Exception as e:
             pass
         
         return False
+    
+    def _choose_best_geocoding_result(self, results, entity):
+        """Choose the best geocoding result based on entity type and result quality."""
+        if not results:
+            return None
+        
+        # For addresses, prefer results with house numbers or detailed addresses
+        if entity['type'] == 'ADDRESS':
+            for result in results:
+                address = result.get('address', {})
+                if address.get('house_number') or address.get('building'):
+                    return result
+        
+        # For organizations, prefer results that are actually organizations
+        if entity['type'] == 'ORGANIZATION':
+            for result in results:
+                if any(keyword in result.get('type', '').lower() 
+                       for keyword in ['building', 'office', 'company', 'institution']):
+                    return result
+        
+        # For general locations, prefer results with higher importance
+        results_with_importance = [r for r in results if r.get('importance')]
+        if results_with_importance:
+            return max(results_with_importance, key=lambda x: float(x.get('importance', 0)))
+        
+        # Fallback to first result
+        return results[0]
 
     def link_to_wikidata(self, entities):
         """Add Wikidata linking with enhanced context and type validation using 'instance of'."""
@@ -1230,7 +1259,7 @@ class StreamlitEntityLinker:
         )
         
         # Default text is now the theatre text
-        default_text = """Recording the Whitechapel Pavilion in 1961. 191-193 Whitechapel Road. theatre. It was a dauntingly complex task, as to my (then) untrained eye, it appeared to be an impenetrable forest of heavy timbers, movable platforms and hoisting gear, looking like the combined wreckage of half a dozen windmills! I started by chalking an individual number on every stage joistin an attempt to provide myself with a simple skeleton on which to hang the more complicated details. Richard Southern's explanations enabled me to allocate names to the various pieces of apparatus, correcting my guesses. ('Stage basement' for example was, I learned, an imprecise way of naming a space with three distinct levels). He also gave me a brilliant introduction to the workings of a traditional wood stage and to the theatric purposes each part fulfilled. The attached sketch attempts to give a summary view of the entire substage. It is set at the first level below the stage, with the proscenium wall at the top and the back wall of the stage house at the bottom. In the terminology of the traditional wood stage, this is the 'mezzanine', from which level, all the substage machinery was worked by an army of stage hands. In the centre, the heavily outlined rectangle is the 'cellar', deeper by about 7ft below the mezzanine floor. Housed in the cellar are a variety of vertically movable platforms designed to move pieces of scenery and complete set pieces. It may be observed at this point that not all of this apparatus will have resulted from one build. A wood stage had the great advantage that it could be adapted at short notice by the stage carpenter to meet the demands of a particular production. The substage, as seen, represents a particular moment in its active life. There are five fast rise or 'star' traps for the sudden appearance (or disappearance) of individual performers (clowns, etc) through the stage floor. The three traps nearest to the audience are 'two post' traps, rather primitive and capable of causing serious injury to an inexpert user. Upstage of these are two of the more advanced and marginally safer 'four post' traps. In both types, the performer stood on a box-like counter-weighted platform with his (usually his) head touching the centre of a 'star' of leather-hinged wood segments. Beefy stage hands pulled suddenly (but with split second timing) on the lines supporting the box, shooting him through the star. In an instant, it closed behind him, leaving no visible aperture in the stage surface. Farther upstage is a row of 'sloats', designed to hold scenic flats, to be slid up through the stage floor. Next comes a grave trap which, as the name suggests, can provide a rectangular sinking in the stage ('Alas, poor Yorick'). Finally, a short bridge and a long bridge, to carry heavy set pieces, with or without chorus members, up through (and, when required, a bit above) the stage. These bridges were operated from whopping great drum and shaft mechanisms on the mezzanine. In order to get all these vertical movements to pass through the stage, its joists, counter-intuitively, have to span from side to side, the long span rather than the more obvious short span. This makes it possible to have removable sections '(sliders') in the stage floor, which are held level position by paddle levers at the ends. When these are released, the slider drops on to runners on the sides of the joists and are then winched off to left and right. The survey of the Pavilion stage was important at the time because it seemed to be the first time that anything of the kind had been done, however imperfectly. Since then, we have learned of complete surviving complexes at, for example, Her Majesty's theatre in London, the Citizens in Glasgow and, most importantly, the Tyne theatre in Newcastle, which has been restored to full working order twice (once after a dreadfully destructive fire) by Dr David Wilmore. Nevertheless, the loss of the archaeological evidence of the Pavilion is much to be regretted.. I can have enjoyable fantasies about witnessing an elaborate pantomime transformation scene from the mezzanine of a Victorian theatre. The place is seething with stage hands, dressers and flimsily clad chorus girls climbing on to the bridges, while the stage is shuddering, having been temporarily robbed of rigidity by the drawing off of the sliders. Orders must be observed to the letter and to the very second, but there can be no shouting, however energetically the orchestra plays. Add naked gas flames to the mix‚ That's enough!"""
+        default_text = """Recording the Whitechapel Pavilion in 1961. 191-193 Whitechapel Road. theatre. It was a dauntingly complex task, as to my (then) untrained eye, it appeared to be an impenetrable forest of heavy timbers, movable platforms and hoisting gear, looking like the combined wreckage of half a dozen windmills! I started by chalking an individual number on every stage joistin an attempt to provide myself with a simple skeleton on which to hang the more complicated details. Richard Southern's explanations enabled me to allocate names to the various pieces of apparatus, correcting my guesses. ('Stage basement' for example was, I learned, an imprecise way of naming a space with three distinct levels). He also gave me a brilliant introduction to the workings of a traditional wood stage and to the theatric purposes each part fulfilled. The attached sketch attempts to give a summary view of the entire substage. It is set at the first level below the stage, with the proscenium wall at the top and the back wall of the stage house at the bottom. In the terminology of the traditional wood stage, this is the 'mezzanine', from which level, all the substage machinery was worked by an army of stage hands. In the centre, the heavily outlined rectangle is the 'cellar', deeper by about 7ft below the mezzanine floor. Housed in the cellar are a variety of vertically movable platforms designed to move pieces of scenery and complete set pieces. It may be observed at this point that not all of this apparatus will have resulted from one build. A wood stage had the great advantage that it could be adapted at short notice by the stage carpenter to meet the demands of a particular production. The substage, as seen, represents a particular moment in its active life. There are five fast rise or 'star' traps for the sudden appearance (or disappearance) of individual performers (clowns, etc) through the stage floor. The three traps nearest to the audience are 'two post' traps, rather primitive and capable of causing serious injury to an inexpert user. Upstage of these are two of the more advanced and marginally safer 'four post' traps. In both types, the performer stood on a box-like counter-weighted platform with his (usually his) head touching the centre of a 'star' of leather-hinged wood segments. Beefy stage hands pulled suddenly (but with split second timing) on the lines supporting the box, shooting him through the star. In an instant, it closed behind him, leaving no visible aperture in the stage surface. Farther upstage is a row of 'sloats', designed to hold scenic flats, to be slid up through the stage floor. Next comes a grave trap which, as the name suggests, can provide a rectangular sinking in the stage ('Alas, poor Yorick'). Finally, a short bridge and a long bridge, to carry heavy set pieces, with or without chorus members, up through (and, when required, a bit above) the stage. These bridges were operated from whopping great drum and shaft mechanisms on the mezzanine. In order to get all these vertical movements to pass through the stage, its joists, counter-intuitively, have to span from side to side, the long span rather than the more obvious short span. This makes it possible to have removable sections '(sliders') in the stage floor, which are held level position by paddle levers at the ends. When these are released, the slider drops on to runners on the sides of the joists and are then winched off to left and right. The survey of the Pavilion stage was important at the time because it seemed to be the first time that anything of the kind had been done, however imperfectly. Since then, we have learned of complete surviving complexes at, for example, Her Majesty's theatre in London, the Citizens in Glasgow and, most importantly, the Tyne theatre in Newcastle, which has been restored to full working order twice (once after a dreadfully destructive fire) by Dr David Wilmore. Nevertheless, the loss of the archaeological evidence of the Pavilion is much to be regretted.. I can have enjoyable fantasies about witnessing an elaborate pantomime transformation scene from the mezzanine of a Victorian theatre. The place is seething with stage hands, dressers and flimsily clad chorus girls climbing on to the bridges, while the stage is shuddering, having been temporarily robbed of rigidity by the drawing off of the sliders. Orders must be observed to the letter and to the very second, but there can be no shouting, however energetically the orchestra plays. Add naked gas flames to the mix… That's enough!"""
         
         # Text input area
         text_input = st.text_area(
@@ -1478,27 +1507,95 @@ class StreamlitEntityLinker:
             self.render_export_section(entities)
 
     def render_entity_summary(self, entities: List[Dict[str, Any]]):
-        """Render a summary table of entities."""
+        """Render a summary table of entities with all requested columns."""
         if not entities:
             st.info("No entities found.")
             return
         
-        # Prepare data for table
+        # Prepare data for table with all requested columns
         summary_data = []
         for entity in entities:
+            # Format coordinates
+            coordinates = ""
+            if entity.get('latitude') and entity.get('longitude'):
+                coordinates = f"{entity['latitude']:.4f}, {entity['longitude']:.4f}"
+            
+            # Format description from various sources
+            description = ""
+            if entity.get('wikidata_description'):
+                description = entity['wikidata_description'][:100] + "..." if len(entity.get('wikidata_description', '')) > 100 else entity.get('wikidata_description', '')
+            elif entity.get('wikipedia_description'):
+                description = entity['wikipedia_description'][:100] + "..." if len(entity.get('wikipedia_description', '')) > 100 else entity.get('wikipedia_description', '')
+            elif entity.get('britannica_title'):
+                description = entity['britannica_title']
+            elif entity.get('sentence_context'):
+                description = entity['sentence_context'][:100] + "..." if len(entity.get('sentence_context', '')) > 100 else entity.get('sentence_context', '')
+            
+            # Format location name
+            location = entity.get('location_name', '') or entity.get('openstreetmap_display_name', '')
+            if location and len(location) > 80:
+                location = location[:80] + "..."
+            
             row = {
                 'Entity': entity['text'],
                 'Type': entity['type'],
-                'Method': entity.get('extraction_method', 'unknown'),
-                'Confidence': f"{float(entity.get('context_confidence', 0)):.2f}",
                 'Links': self.format_entity_links(entity),
-                'Context': entity.get('sentence_context', '')[:100] + "..." if entity.get('sentence_context', '') else ""
+                'Description': description,
+                'Coordinates': coordinates,
+                'Location': location
             }
             summary_data.append(row)
         
         # Create DataFrame and display
         df = pd.DataFrame(summary_data)
-        st.dataframe(df, use_container_width=True)
+        
+        # Configure column widths for better display
+        column_config = {
+            'Entity': st.column_config.TextColumn(
+                'Entity',
+                width='medium',
+                help='The extracted entity text'
+            ),
+            'Type': st.column_config.TextColumn(
+                'Type',
+                width='small',
+                help='Entity type (PERSON, LOCATION, etc.)'
+            ),
+            'Links': st.column_config.TextColumn(
+                'Links',
+                width='medium',
+                help='Available external links'
+            ),
+            'Description': st.column_config.TextColumn(
+                'Description',
+                width='large',
+                help='Description from linked sources or context'
+            ),
+            'Coordinates': st.column_config.TextColumn(
+                'Coordinates',
+                width='medium',
+                help='Latitude, Longitude coordinates'
+            ),
+            'Location': st.column_config.TextColumn(
+                'Location',
+                width='large',
+                help='Full location name from geocoding'
+            )
+        }
+        
+        st.dataframe(
+            df, 
+            use_container_width=True,
+            column_config=column_config,
+            hide_index=True
+        )
+        
+        # Add a summary of geocoded entities
+        geocoded_count = len([e for e in entities if e.get('latitude')])
+        if geocoded_count > 0:
+            st.info(f"ℹ️ {geocoded_count} out of {len(entities)} entities have been geocoded with coordinates.")
+        else:
+            st.info("ℹ️ No entities were successfully geocoded with coordinates.")
 
     def render_detailed_analysis(self, entities: List[Dict[str, Any]]):
         """Render detailed analysis of entities."""
@@ -1571,16 +1668,16 @@ class StreamlitEntityLinker:
                         st.write(f"- {nearby['text']} ({nearby['type']}) - {nearby['distance']} chars away")
 
     def format_entity_links(self, entity: Dict[str, Any]) -> str:
-        """Format entity links for display in table."""
+        """Enhanced format entity links for display in table."""
         links = []
         if entity.get('wikipedia_url'):
-            links.append("Wikipedia")
+            links.append("📖 Wikipedia")
         if entity.get('wikidata_url'):
-            links.append("Wikidata")
+            links.append("🔗 Wikidata")
         if entity.get('britannica_url'):
-            links.append("Britannica")
+            links.append("📚 Britannica")
         if entity.get('openstreetmap_url'):
-            links.append("OpenStreetMap")
+            links.append("🗺️ OSM")
         return " | ".join(links) if links else "No links"
 
     def render_export_section(self, entities: List[Dict[str, Any]]):

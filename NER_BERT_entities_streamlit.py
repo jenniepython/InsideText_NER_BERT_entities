@@ -1495,7 +1495,7 @@ class StreamlitEntityLinker:
             st.info("No highlighted text available. Process some text first.")
         
         # Entity analysis tabs
-        tab1, tab2, tab3 = st.tabs(["Entity Summary", "🔍 Detailed Analysis", "📤 Export Options"])
+        tab1, tab2, tab3 = st.tabs(["Entity Summary", "Detailed Analysis", "Export Options"])
         
         with tab1:
             self.render_entity_summary(entities)
@@ -1593,9 +1593,9 @@ class StreamlitEntityLinker:
         # Add a summary of geocoded entities
         geocoded_count = len([e for e in entities if e.get('latitude')])
         if geocoded_count > 0:
-            st.info(f"ℹ️ {geocoded_count} out of {len(entities)} entities have been geocoded with coordinates.")
+            st.info(f" {geocoded_count} out of {len(entities)} entities have been geocoded with coordinates.")
         else:
-            st.info("ℹ️ No entities were successfully geocoded with coordinates.")
+            st.info("No entities were successfully geocoded with coordinates.")
 
     def render_detailed_analysis(self, entities: List[Dict[str, Any]]):
         """Render detailed analysis of entities."""
@@ -1671,13 +1671,13 @@ class StreamlitEntityLinker:
         """Enhanced format entity links for display in table."""
         links = []
         if entity.get('wikipedia_url'):
-            links.append("📖 Wikipedia")
+            links.append("Wikipedia")
         if entity.get('wikidata_url'):
-            links.append("🔗 Wikidata")
+            links.append("Wikidata")
         if entity.get('britannica_url'):
-            links.append("📚 Britannica")
+            links.append("Britannica")
         if entity.get('openstreetmap_url'):
-            links.append("🗺️ OSM")
+            links.append("OSM")
         return " | ".join(links) if links else "No links"
 
     def render_export_section(self, entities: List[Dict[str, Any]]):
@@ -1759,7 +1759,7 @@ class StreamlitEntityLinker:
             json_str = json.dumps(json_data, indent=2, ensure_ascii=False)
             
             st.download_button(
-                label="📄 Download Enhanced JSON-LD",
+                label="Download Enhanced JSON-LD",
                 data=json_str,
                 file_name=f"{st.session_state.analysis_title}_improved_entities.jsonld",
                 mime="application/ld+json",
@@ -1818,7 +1818,7 @@ class StreamlitEntityLinker:
                         </div>
                     </div>
                     <div class="improvement-note">
-                        <h3>🚀 Improvements Made:</h3>
+                        <h3>Improvements Made:</h3>
                         <p>• <strong>Lower Confidence Threshold</strong>: Reduced from 0.6 to 0.3 for better entity capture</p>
                         <p>• <strong>Better Aggregation</strong>: Changed to "max" strategy for multi-word entities</p>
                         <p>• <strong>Relaxed Validation</strong>: Less restrictive entity filtering</p>

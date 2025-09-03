@@ -1332,7 +1332,15 @@ class StreamlitEntityLinker:
             st.metric("Entity Types", unique_types)
         
         # Show average confidence score
-        confidences = [e.get('confidence', 0) for e in entities if e.get('confidence')]
+        confidences = []
+        for e in entities:
+            if e.get('confidence'):
+                try:
+                    conf_val = float(e['confidence'])
+                    confidences.append(conf_val)
+                except (ValueError, TypeError):
+                    pass  # Skip invalid confidence values
+        
         if confidences:
             avg_confidence = sum(confidences) / len(confidences)
             st.metric("Average Confidence", f"{avg_confidence:.2f}")

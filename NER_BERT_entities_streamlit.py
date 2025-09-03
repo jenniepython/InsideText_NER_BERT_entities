@@ -150,22 +150,127 @@ class EntityLinker:
             loading_placeholder = st.empty()
             loading_placeholder.info("Loading BERT NER model... This may take a minute on first run.")
             
-            from transformers import pipeline
+            # Try different import approaches
+            try:
+                from transformers import pipeline
+                loading_method = "pipeline"
+            except ImportError:
+                try:
+                    from transformers import AutoTokenizer, AutoModelForTokenClassification
+                    loading_method = "auto_classes"
+                except ImportError as e:
+                    st.error(f"Cannot import transformers components: {e}")
+                    st.error("Please reinstall transformers:")
+                    st.code("pip uninstall transformers\npip install transformers>=4.21.0 torch")
+                    st.stop()
             
-            # Load the dslim/bert-large-NER model
-            ner_pipeline = pipeline(
-                "ner", 
-                model="dslim/bert-large-NER",
-                tokenizer="dslim/bert-large-NER",
-                aggregation_strategy="simple"  # This groups B- and I- tags together
-            )
+            if loading_method == "pipeline":
+                # Load the dslim/bert-large-NER model using pipeline
+                ner_pipeline = pipeline(
+                    "ner", 
+                    model="dslim/bert-large-NER",
+                    tokenizer="dslim/bert-large-NER",
+                    aggregation_strategy="simple"  # This groups B- and I- tags together
+                )
+            else:
+                # Fallback method using AutoTokenizer and AutoModelForTokenClassification
+                tokenizer = AutoTokenizer.from_pretrained("dslim/bert-large-NER")
+                model = AutoModelForTokenClassification.from_pretrained("dslim/bert-large-NER")
+                
+                # Create a simple wrapper class to mimic pipeline behavior
+                class NERPipelineWrapper:
+                    def __init__(self, model, tokenizer):
+                        self.model = model
+                        self.tokenizer = tokenizer
+                        import torch
+                        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+                        self.model.to(self.device)
+                        
+                    def __call__(self, text):
+                        import torch
+                        from torch.nn.functional import softmax
+                        
+                        # Tokenize the input
+                        inputs = self.tokenizer(text, return_tensors="pt", truncation=True, max_length=512)
+                        inputs = {k: v.to(self.device) for k, v in inputs.items()}
+                        
+                        # Get model predictions
+                        with torch.no_grad():
+                            outputs = self.model(**inputs)
+                        
+                        predictions = torch.argmax(outputs.logits, dim=2)
+                        scores = softmax(outputs.logits, dim=2)
+                        
+                        # Convert tokens back to text and extract entities
+                        tokens = self.tokenizer.convert_ids_to_tokens(inputs["input_ids"][0])
+                        
+                        entities = []
+                        current_entity = None
+                        current_text = ""
+                        current_start = 0
+                        
+                        for i, (token, pred, score_tensor) in enumerate(zip(tokens, predictions[0], scores[0])):
+                            if token in ['[CLS]', '[SEP]', '[PAD]']:
+                                continue
+                                
+                            label = self.model.config.id2label[pred.item()]
+                            confidence = score_tensor[pred.item()].item()
+                            
+                            if label != 'O' and confidence > 0.5:  # Only high-confidence predictions
+                                if label.startswith('B-') or current_entity != label.replace('I-', '').replace('B-', ''):
+                                    # Start new entity
+                                    if current_entity:
+                                        entities.append({
+                                            'entity_group': current_entity,
+                                            'score': current_score / current_length,
+                                            'word': current_text.strip().replace('##', ''),
+                                            'start': current_start,
+                                            'end': current_start + len(current_text.strip().replace('##', ''))
+                                        })
+                                    
+                                    current_entity = label.replace('B-', '').replace('I-', '')
+                                    current_text = token.replace('##', '')
+                                    current_score = confidence
+                                    current_length = 1
+                                    current_start = len(self.tokenizer.decode(inputs["input_ids"][0][:i], skip_special_tokens=True))
+                                else:
+                                    # Continue current entity
+                                    current_text += token.replace('##', '')
+                                    current_score += confidence
+                                    current_length += 1
+                            else:
+                                if current_entity:
+                                    entities.append({
+                                        'entity_group': current_entity,
+                                        'score': current_score / current_length,
+                                        'word': current_text.strip().replace('##', ''),
+                                        'start': current_start,
+                                        'end': current_start + len(current_text.strip().replace('##', ''))
+                                    })
+                                    current_entity = None
+                        
+                        # Don't forget the last entity
+                        if current_entity:
+                            entities.append({
+                                'entity_group': current_entity,
+                                'score': current_score / current_length,
+                                'word': current_text.strip().replace('##', ''),
+                                'start': current_start,
+                                'end': current_start + len(current_text.strip().replace('##', ''))
+                            })
+                        
+                        return entities
+                
+                ner_pipeline = NERPipelineWrapper(model, tokenizer)
             
-            loading_placeholder.success(f"Loaded BERT NER model successfully")
+            loading_placeholder.success(f"Loaded BERT NER model successfully using {loading_method}")
             return ner_pipeline
+            
         except Exception as e:
             st.error(f"Failed to load BERT NER model: {e}")
             st.error("Please ensure transformers and torch are installed properly.")
-            st.code("pip install transformers torch")
+            st.code("pip uninstall transformers\npip install transformers>=4.21.0 torch torchvision")
+            st.info("You might also try: pip install --upgrade transformers torch")
             st.stop()
 
     def extract_entities(self, text: str):
@@ -1133,14 +1238,36 @@ class StreamlitEntityLinker:
                 # Step 3: Link to Wikipedia (cached)
                 status_text.text("Linking to Wikipedia...")
                 progress_bar.progress(60)
-                entities_json = json.dumps(entities, default=str)
+                # Ensure numeric values are preserved
+                entities_for_json = []
+                for entity in entities:
+                    entity_copy = entity.copy()
+                    if 'confidence' in entity_copy and entity_copy['confidence'] is not None:
+                        try:
+                            entity_copy['confidence'] = float(entity_copy['confidence'])
+                        except (ValueError, TypeError):
+                            pass  # Keep as-is if conversion fails
+                    entities_for_json.append(entity_copy)
+                
+                entities_json = json.dumps(entities_for_json, default=str)
                 linked_entities_json = self.cached_link_to_wikipedia(entities_json)
                 entities = json.loads(linked_entities_json)
                 
                 # Step 4: Link to Britannica (cached)
                 status_text.text("Linking to Britannica...")
                 progress_bar.progress(70)
-                entities_json = json.dumps(entities, default=str)
+                # Ensure numeric values are preserved
+                entities_for_json = []
+                for entity in entities:
+                    entity_copy = entity.copy()
+                    if 'confidence' in entity_copy and entity_copy['confidence'] is not None:
+                        try:
+                            entity_copy['confidence'] = float(entity_copy['confidence'])
+                        except (ValueError, TypeError):
+                            pass  # Keep as-is if conversion fails
+                    entities_for_json.append(entity_copy)
+                
+                entities_json = json.dumps(entities_for_json, default=str)
                 linked_entities_json = self.cached_link_to_britannica(entities_json)
                 entities = json.loads(linked_entities_json)
                 
